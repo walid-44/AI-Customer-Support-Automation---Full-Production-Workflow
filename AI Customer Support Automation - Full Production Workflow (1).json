@@ -1,0 +1,1585 @@
+{
+  "name": "AI Customer Support Automation - Full Production Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message",
+          "callback_query"
+        ],
+        "additionalFields": {}
+      },
+      "id": "4508f65d-8cb7-4cc9-84e4-0309e1d853a3",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1,
+      "position": [
+        -4640,
+        -688
+      ],
+      "webhookId": "3f0379e6-f97c-443d-940e-d7ef012993c5",
+      "credentials": {
+        "telegramApi": {
+          "id": "ZXBzvczFWIRRpi8m",
+          "name": "Telegram account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// 1. تحديد ما إذا كان الحدث ضغطة زر أم رسالة عادية (مع دعم البيانات القادمة من Edit Fields أو تيليجرام)\nconst isCallback = !!$json.callback_query;\nconst callbackQuery = $json.callback_query || null;\n\nconst updateId = $json.update_id || $json.updata_id || null;\nconst message = isCallback ? (callbackQuery.message || {}) : ($json.message || null);\n\n// 2. استخراج بيانات العميل والشات بأمان للحالتين (دعم Edit Fields المباشر أو البنية الخام)\nconst userObj = isCallback ? (callbackQuery.from || {}) : ($json.user_id ? { id: $json.user_id, first_name: $json.name } : (message.from || {}));\nconst chatId = $json.chat_id || (isCallback ? callbackQuery.message?.chat?.id : (message.chat?.id || userObj.id)) || null;\nconst userId = $json.user_id || userObj.id || null;\nconst firstName = $json.name || userObj.first_name || 'Customer';\n\n// استخراج النص بمرونة (سواء من Edit Fields المباشر أو من رسالة تيليجرام)\nconst rawText = ($json.text || message?.text || '').trim();\n\n// 3. مسار التعامل مع ضغطات الأزرار التفاعلية (Callback Query)\nif (isCallback) {\n  return [{\n    json: {\n      is_callback: true,\n      callback_query_id: callbackQuery.id,\n      callback_data: callbackQuery.data,\n      user_id: userId,\n      chat_id: chatId,\n      first_name: firstName,\n      name: firstName,\n      update_id: updateId,\n      idempotency_key: `cb_${callbackQuery.id}`\n    }\n  }];\n}\n\n// 4. مسار التعامل مع الرسائل النصية (إهمال غير النصية)\nif (!rawText || !chatId) {\n  return []; // إهمال الرسائل غير النصية أو الفارغة\n}\n\n// 5. استخراج الـ Tag الخاص بـ RAG (مثل Q1, Q2) إن وجد\nconst qMatch = rawText.match(/(?:[\\s?#,-]*)\\b([qQ][1-5])\\b/i);\nconst cleanText = qMatch ? rawText.replace(qMatch[0], '').trim() : rawText;\nconst targetNamespace = qMatch ? qMatch[1].toUpperCase() : null;\n\nreturn [{\n  json: {\n    is_callback: false,\n    update_id: updateId,\n    chat_id: chatId,\n    user_id: userId,\n    name: firstName,\n    first_name: firstName,\n    text: cleanText,\n    raw_text: rawText,\n    target_namespace: targetNamespace,\n    idempotency_key: `msg_${updateId || Date.now()}_${chatId}`\n  }\n}];"
+      },
+      "id": "2d40f2d3-315d-45ee-823f-527ed95757e6",
+      "name": "Extract Message & Idempotency Key",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3488,
+        -672
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO idempotency_keys (key_id, processed_at) VALUES ('{{ $json.update_id }}', NOW()) ON CONFLICT (key_id) DO NOTHING RETURNING key_id;",
+        "options": {}
+      },
+      "id": "61e7553c-ca0a-4861-99ee-104646b3391e",
+      "name": "Check Idempotency (Supabase)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -2384,
+        -272
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "VHDEr5HgmwfQo3wC",
+          "name": "Postgres account 5"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.length > 0 }}",
+              "operation": "notEqual",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "14e2ea98-c4de-4f4f-bd18-51ae070c84ca",
+      "name": "Is Unique Message?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -1968,
+        -272
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(*) as msg_count \nFROM messages \nWHERE user_id = '{{ $('Extract Message & Idempotency Key').item.json.user_id }}' \n  AND created_at > NOW() - INTERVAL '1 day';",
+        "options": {}
+      },
+      "id": "18020499-c1c7-4011-bf41-5e5a858d7c5c",
+      "name": "Rate Limit Check (Supabase)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -1776,
+        -288
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "VHDEr5HgmwfQo3wC",
+          "name": "Postgres account 5"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ parseInt($json.msg_count) }}",
+              "value2": 15
+            }
+          ]
+        }
+      },
+      "id": "73b43c9a-28a1-465e-a983-2d5e6a642ee6",
+      "name": "Under Rate Limit?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -1616,
+        -288
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Extract Message & Idempotency Key').item.json.chat_id }}",
+        "text": "⚠️ تم تجاوز الحد المسموح من الرسائل. يرجى الانتظار   24 ساعة قبل إرسال سؤال آخر.",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "id": "1e2377a6-6dd7-49d5-a261-3a1a41a754ba",
+      "name": "Send Rate Limit Alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [
+        -1424,
+        -64
+      ],
+      "webhookId": "6727072e-e352-48ff-8811-73b80b4c85ec",
+      "credentials": {
+        "telegramApi": {
+          "id": "ZXBzvczFWIRRpi8m",
+          "name": "Telegram account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH cust AS (\n  INSERT INTO customers (telegram_user_id, name)\n  VALUES ('{{ $('Extract Message & Idempotency Key').item.json.user_id }}', '{{ $('Extract Message & Idempotency Key').item.json.name }}')\n  ON CONFLICT (telegram_user_id) DO UPDATE SET name = EXCLUDED.name\n  RETURNING id\n),\nconv AS (\n  INSERT INTO conversations (customer_id, status)\n  SELECT id, 'active' FROM cust\n  ON CONFLICT (customer_id) WHERE status = 'active' DO UPDATE SET updated_at = NOW()\n  RETURNING id\n)\nINSERT INTO messages (conversation_id, user_id, sender_type, content)\nVALUES (\n  COALESCE((SELECT id FROM conv), (SELECT id FROM conversations WHERE customer_id = (SELECT id FROM customers WHERE telegram_user_id = '{{ $('Extract Message & Idempotency Key').item.json.user_id }}') AND status = 'active' LIMIT 1)),\n  '{{ $('Extract Message & Idempotency Key').item.json.user_id }}',\n  'user',\n  '{{ $('Extract Message & Idempotency Key').item.json.text.replace(/'/g, \"''\") }}'\n)\nRETURNING conversation_id;",
+        "options": {}
+      },
+      "id": "0deb3988-9ea7-4727-b7d5-87239759e586",
+      "name": "Upsert Customer & Log Message",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -1424,
+        -304
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "VHDEr5HgmwfQo3wC",
+          "name": "Postgres account 5"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT sender_type, content FROM messages WHERE conversation_id = '{{ $json.conversation_id }}' ORDER BY created_at DESC LIMIT 6;",
+        "options": {}
+      },
+      "id": "20d0fb84-8611-49cd-b419-4ff393ca8349",
+      "name": "Get Conversation History",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -1168,
+        -304
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "VHDEr5HgmwfQo3wC",
+          "name": "Postgres account 5"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/embeddings",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "text-embedding-3-small"
+            },
+            {
+              "name": "input",
+              "value": "={{ $('Extract Message & Idempotency Key').item.json.text }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "d6398ef3-c62a-45bc-8682-1c467cbaffbb",
+      "name": "Generate Vector Embedding",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -480,
+        -304
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "h194ciLm8x8p4nVK",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://rag-chat-55ava1c.svc.aped-4627-b74a.pinecone.io/query",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Api-Key",
+              "value": "={{$env.PINECONE_RAG_KEY}}"
+            },
+            {
+              "name": "Content-Type ",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"vector\": {{ JSON.stringify($json.data[0].embedding) }},\n  \"topK\": 10,\n  \"includeMetadata\": true,\n  \"namespace\":\"{{$('Verify the escalation').item.json.namespace }}\"\n}",
+        "options": {}
+      },
+      "id": "d8110b30-2607-4c60-b802-7fff7ec8bce4",
+      "name": "Pinecone RAG Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -272,
+        -304
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  {\n    \"model\": \"gpt-4o-mini\",\n    \"response_format\": { \"type\": \"json_object\" },\n    \"messages\": [\n      {\n        \"role\": \"system\",\n        \"content\": \"You are an AI customer support expert. Answer the user prompt based ONLY on the provided Knowledge Context. Also classify intent and assign a confidence score between 0.0 and 1.0.\\nRespond ONLY in this JSON format:\\n{\\n \\\"intent\\\": \\\"faq_intent | account_support | human_escalation_request | unknown\\\",\\n \\\"confidence\\\": 0.95,\\n \\\"answer\\\": \\\"Your response text here...\\\",\\n \\\"needs_escalation\\\": false\\n}\"\n      },\n      {\n        \"role\": \"user\",\n        \"content\": `Knowledge Context:\n${($json.results || []).map(m => `Score: ${m.relevance_score}\\n${$('Pinecone RAG Search').first().json.matches[m.index]?.metadata?.text || ''}`).join(\"\\n---\\n\")}\n\nUser Query:\n${$('Extract Message & Idempotency Key').first().json.text}`\n      }\n    ]\n  }\n}}",
+        "options": {}
+      },
+      "id": "ea290c3c-0773-436a-bc41-a89c8e8e4efa",
+      "name": "LLM Reasoning & Intent Classification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        176,
+        -304
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "h194ciLm8x8p4nVK",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// 1. استخراج محتوى الـ LLM بأمان مع التعامل مع صيغ الـ JSON أو الـ Markdown\nlet rawContent = $json.choices?.[0]?.message?.content || '{}';\n\nif (typeof rawContent === 'string') {\n  // تنظيف النص في حال وجود ```json ... ```\n  rawContent = rawContent.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n}\n\nlet responseContent = {};\ntry {\n  responseContent = typeof rawContent === 'string' ? JSON.parse(rawContent) : rawContent;\n} catch (e) {\n  responseContent = {\n    confidence: 0,\n    needs_escalation: true,\n    intent: 'unknown',\n    answer: typeof rawContent === 'string' ? rawContent : 'لم أتمكن من العثور على الإجابة المناسبة.'\n  };\n}\n\nconst confidence = responseContent.confidence || 0;\nconst needsEscalation = responseContent.needs_escalation ?? false;\nconst intent = responseContent.intent || 'unknown';\nconst answer = responseContent.answer || 'لم أتمكن من العثور على الإجابة المناسبة.';\n\n// 2. تطبيق شرط القرار والتصعيد بناءً على الثقة\nconst isHighConfidence = (confidence >= 0.75) && !needsEscalation && (intent !== 'human_escalation_request');\n\n// 3. جلب بيانات التوكنز من عقدة OpenAI\nconst openAiUsage = $('LLM Reasoning & Intent Classification').first()?.json?.usage || {};\nconst promptTokens = openAiUsage.prompt_tokens || 0;\nconst completionTokens = openAiUsage.completion_tokens || 0;\nconst totalTokens = openAiUsage.total_tokens || 0;\n\n// 4. حساب التكاليف الفعلية (USD)\n// gpt-4o-mini: $0.15 / 1M input, $0.60 / 1M output\nconst llmCost = (promptTokens * (0.15 / 1000000)) + (completionTokens * (0.60 / 1000000));\n\n// text-embedding-3-small (تقديري لـ 50 token): $0.02 / 1M input\nconst embeddingCost = 50 * (0.02 / 1000000); \n\n// Cohere Rerank v3.5: $2.00 لكل 1,000 استعلام ($0.002 لكل طلب)\nconst rerankCost = 0.002;\n\n// إجمالي تكلفة الاستعلام الواحد بالدولار\nconst totalQueryCost = llmCost + embeddingCost + rerankCost;\n\n// حالة منع التصعيد / نجاح البوت (Deflection Status)\nconst isDeflected = !needsEscalation;\n\n// 5. إرجاع النتيجة النهائية جاهزة للتخزين في Supabase\nreturn [{\n  json: {\n    ...$json,\n    is_high_confidence: isHighConfidence,\n    needs_escalation: needsEscalation,\n    confidence: confidence,\n    intent: intent,\n    answer: answer,\n    chat_id: $('Extract Message & Idempotency Key').first()?.json?.chat_id,\n    conversation_id: $('Upsert Customer & Log Message').first()?.json?.conversation_id,\n    prompt_tokens: promptTokens,\n    completion_tokens: completionTokens,\n    total_tokens: totalTokens,\n    estimated_cost_usd: Number(totalQueryCost.toFixed(6)),\n    is_deflected: isDeflected\n  }\n}];"
+      },
+      "id": "3ad85d67-fbfc-4cba-af21-c660d64ea4e4",
+      "name": "Evaluate Confidence & Decision Route",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        384,
+        -304
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.needs_escalation }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "fc17c1c5-ea79-43f3-813a-69d59805a6a2",
+      "name": "Confidence Routing Switch",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        560,
+        -304
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "={{ $json.answer }}",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "👍 مفيدة",
+                    "additionalFields": {
+                      "callback_data": "rate_good"
+                    }
+                  },
+                  {
+                    "text": "👎 غير مفيدة",
+                    "additionalFields": {
+                      "callback_data": "rate_bad"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "👨‍💼 طلب تحويل لموظف",
+                    "additionalFields": {
+                      "callback_data": "escalate_human"
+                    }
+                  }
+                ]
+              }
+            },
+            {}
+          ]
+        },
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "id": "8171be67-b704-42f9-b740-6448d23b4817",
+      "name": "Send AI Telegram Response",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [
+        768,
+        -176
+      ],
+      "webhookId": "c48f1ad0-53f9-4e65-a6cd-679cfae1506f",
+      "credentials": {
+        "telegramApi": {
+          "id": "ZXBzvczFWIRRpi8m",
+          "name": "Telegram account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO messages (conversation_id, sender_type, content , answer, confidence_score, prompt_tokens, completion_tokens, total_tokens, estimated_cost_usd, is_deflected) VALUES ($1, 'bot', $2, $3, $4, $5, $6, $7, $8 , $9);",
+        "options": {
+          "queryReplacement": "=={{ $('Evaluate Confidence & Decision Route').item.json.conversation_id }}={{ $('Message a model').first().json.output[0].content[0].text.refined_query }}={{ $('Evaluate Confidence & Decision Route').item.json.answer }}={{ $('Evaluate Confidence & Decision Route').item.json.confidence }}={{ $('Confidence Routing Switch').item.json.usage.prompt_tokens }}={{ $('Confidence Routing Switch').item.json.usage.completion_tokens }}={{ $('Confidence Routing Switch').item.json.usage.total_tokens }}={{ $('Confidence Routing Switch').item.json.estimated_cost_usd }}={{ $('Confidence Routing Switch').item.json.is_deflected }}",
+          "replaceEmptyStrings": false
+        }
+      },
+      "id": "727ea6f1-6669-49e9-85b3-8830be9ec390",
+      "name": "Log AI Reply in Database",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1072,
+        -176
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "VHDEr5HgmwfQo3wC",
+          "name": "Postgres account 5"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Evaluate Confidence & Decision Route').item.json.chat_id }}",
+        "text": "👨‍💼 تم تحويل طلبك لأحد ممثلي خدمة العملاء وسيقوم بالرد عليك في أقرب وقت.",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "id": "c147d5e6-2dd2-44e2-9c2e-1e502d189711",
+      "name": "Send Human Escalation Notice",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [
+        784,
+        -480
+      ],
+      "webhookId": "22fb9c8b-5f2c-41e8-9c29-6035f4a1956d",
+      "credentials": {
+        "telegramApi": {
+          "id": "ZXBzvczFWIRRpi8m",
+          "name": "Telegram account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE conversations \nSET status = 'escalated' \nWHERE id = '{{ $('Evaluate Confidence & Decision Route').item.json.conversation_id }}';\n\nINSERT INTO messages (conversation_id, sender_type, content, confidence_score) \nVALUES (\n  '{{ $('Evaluate Confidence & Decision Route').item.json.conversation_id }}', \n  'system', \n  'Escalated to human support', \n  {{ $('Evaluate Confidence & Decision Route').item.json.confidence }}\n);",
+        "options": {}
+      },
+      "id": "bc1d7591-8c38-48a0-98be-ab10324b09a8",
+      "name": "Escalate Ticket (Supabase Log)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1056,
+        -480
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "VHDEr5HgmwfQo3wC",
+          "name": "Postgres account 5"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "sendChatAction",
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}"
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -2160,
+        -272
+      ],
+      "id": "ae8fdbe7-24cf-44ca-86f6-6004def87b06",
+      "name": "Send a chat action",
+      "webhookId": "f22c57bb-527d-4049-bd0c-71244d0e6b0d",
+      "credentials": {
+        "telegramApi": {
+          "id": "ZXBzvczFWIRRpi8m",
+          "name": "Telegram account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "4e5ea5f2-6684-4cda-bd55-aa3e0bed5014",
+              "leftValue": "={{ $json.is_callback }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -2944,
+        -704
+      ],
+      "id": "d4e20003-d371-4d8c-a61b-4b9321138673",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $('Telegram Trigger').item.json.callback_query.data }}",
+                    "rightValue": "rate_",
+                    "operator": {
+                      "type": "string",
+                      "operation": "startsWith"
+                    },
+                    "id": "8f8ba1f6-d8aa-4895-8500-3a84f4dfbfcc"
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "5b9b5f4c-2b93-4879-a4ca-69dfbc51364d",
+                    "leftValue": "={{ $('Telegram Trigger').item.json.callback_query.data }}",
+                    "rightValue": "escalate_human",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "d3b9a812-fdd7-4096-99b9-11a7d04e305e",
+                    "leftValue": "={{ $json.callback_data }}",
+                    "rightValue": "assign_",
+                    "operator": {
+                      "type": "string",
+                      "operation": "startsWith"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        -2944,
+        -928
+      ],
+      "id": "943c8fb7-2547-49c6-85c5-d853950b6961",
+      "name": "Switch"
+    },
+    {
+      "parameters": {
+        "resource": "callback",
+        "queryId": "={{ $('Telegram Trigger').item.json.callback_query.id }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -2384,
+        -464
+      ],
+      "id": "adecc002-f3ab-438e-bdb0-773531511487",
+      "name": "Answer Query a callback",
+      "webhookId": "022b1588-60c6-4b1f-bfda-8f3167e13f85",
+      "credentials": {
+        "telegramApi": {
+          "id": "ZXBzvczFWIRRpi8m",
+          "name": "Telegram account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE messages \nSET rating = '{{ $('Telegram Trigger').item.json.callback_query.data }}'\nWHERE id = (\n  SELECT id FROM messages \n  WHERE conversation_id = (\n    SELECT id FROM conversations \n    WHERE user_id = '{{ $('Telegram Trigger').item.json.callback_query.from.id }}' \n    ORDER BY created_at DESC LIMIT 1\n  )\n  ORDER BY created_at DESC \n  LIMIT 1\n);",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        -2384,
+        -1120
+      ],
+      "id": "2bdddbdf-a5cf-4f42-84fd-fa80c3ef5e43",
+      "name": "Execute a SQL query",
+      "credentials": {
+        "postgres": {
+          "id": "VHDEr5HgmwfQo3wC",
+          "name": "Postgres account 5"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- 1. تحديث تقييم آخر رسالة\nUPDATE messages \nSET rating = 'escalate_human' \nWHERE id = (\n    SELECT m.id \n    FROM messages m \n    JOIN conversations c ON m.conversation_id = c.id \n    JOIN customers cust ON c.customer_id = cust.id\n    WHERE cust.telegram_user_id = '8549971512' \n    ORDER BY m.created_at DESC \n    LIMIT 1\n);\n\n-- 2. تحديث حالة المحادثة\nUPDATE conversations \nSET status = 'escalated' \nWHERE customer_id = (\n    SELECT id FROM customers WHERE telegram_user_id = '8549971512'\n);",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        -2384,
+        -896
+      ],
+      "id": "1f95172e-62ff-4056-a28b-1a651d5a8162",
+      "name": "Execute a SQL query1",
+      "credentials": {
+        "postgres": {
+          "id": "VHDEr5HgmwfQo3wC",
+          "name": "Postgres account 5"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Switch').item.json.chat_id }}",
+        "text": "👨‍💼 تم تحويل طلبك لأحد ممثلي خدمة العملاء وسيقوم بالرد عليك في أقرب وقت.",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "id": "cfcd12df-15a9-4dad-a73f-77b504177bbf",
+      "name": "Send Human Escalation Notice1",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [
+        -2160,
+        -896
+      ],
+      "webhookId": "22fb9c8b-5f2c-41e8-9c29-6035f4a1956d",
+      "credentials": {
+        "telegramApi": {
+          "id": "ZXBzvczFWIRRpi8m",
+          "name": "Telegram account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- 1. تحديث تقييم آخر رسالة للعميل\nUPDATE messages \nSET rating = 'escalate_human' \nWHERE id = (\n    SELECT m.id \n    FROM messages m \n    JOIN conversations c ON m.conversation_id = c.id \n    JOIN customers cust ON c.customer_id = cust.id\n    WHERE cust.telegram_user_id::text = '{{ $json.result?.chat?.id || $json.chat_id || $json.user_id }}'::text \n    ORDER BY m.created_at DESC \n    LIMIT 1\n);\n\n-- 2. تحديث حالة المحادثة إلى تصعيد\nUPDATE conversations \nSET status = 'escalated' \nWHERE customer_id = (\n    SELECT id FROM customers \n    WHERE telegram_user_id::text = '{{ $json.result?.chat?.id || $json.chat_id || $json.user_id }}'::text\n);\n\n-- 3. إنشاء التذكرة وإرجاع (ticket_id, first_name, chat_id)\nWITH inserted_ticket AS (\n    INSERT INTO tickets (conversation_id, customer_id, status)\n    SELECT c.id, c.customer_id, 'open'::ticket_status\n    FROM conversations c\n    JOIN customers cust ON c.customer_id = cust.id\n    WHERE cust.telegram_user_id::text = '{{ $json.result?.chat?.id || $json.chat_id || $json.user_id }}'::text\n    ORDER BY c.created_at DESC\n    LIMIT 1\n    RETURNING id AS ticket_id, customer_id\n)\nSELECT \n    it.ticket_id,\n    cust.name,\n    cust.telegram_user_id AS chat_id\nFROM inserted_ticket it\nJOIN customers cust ON it.customer_id = cust.id;\n",
+        "options": {}
+      },
+      "id": "fd308e44-0370-4860-85fd-3f6555c470d1",
+      "name": "Create Ticket in Supabase",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -1872,
+        -896
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "VHDEr5HgmwfQo3wC",
+          "name": "Postgres account 5"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "-1003962072776",
+        "text": "=\n\n👤 <b>العميل:</b> {{ $json.name }}\n🆔 <b>المعرف:</b> <code>{{ $json.chat_id }}</code>\n🎫 <b>رقم التذكرة:</b> <code>{{ $json.ticket_id }}</code>\n\n💬 <b>رابط التواصل المباشر مع العميل:</b>\n<a href=\"tg://user?id={{ $json.chat_id }}\">اضغط هنا لفتح محادثة خاصة مع العميل 💬</a>",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "👨‍💻 استلام التذكرة",
+                    "additionalFields": {
+                      "callback_data": "=assign_ticket_{{ $json.ticket_id }}"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "6223ae6c-71e5-488a-a16a-34b8115a6103",
+      "name": "Notify Support Group",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [
+        -1696,
+        -896
+      ],
+      "webhookId": "9c92a818-e26f-4524-8151-fbffaa301743",
+      "credentials": {
+        "telegramApi": {
+          "id": "ZXBzvczFWIRRpi8m",
+          "name": "Telegram account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE tickets \nSET group_message_id = {{ $json.result.message_id }} \nWHERE id = '{{ $('Create Ticket in Supabase').item.json.ticket_id }}'\nRETURNING id, group_message_id;",
+        "options": {}
+      },
+      "id": "01c4dad7-6d64-4af7-aa03-a7e3621d1d5c",
+      "name": "Save Group Message ID",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -1504,
+        -896
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "VHDEr5HgmwfQo3wC",
+          "name": "Postgres account 5"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE tickets \nSET \n    status = 'in_progress'::ticket_status,\n    assigned_to = ' {{ $json.first_name }}({{ $json.callback_query_id }})',\n    updated_at = NOW()\nWHERE id::text = REPLACE('{{ $json.callback_data }}', 'assign_ticket_', '')\nRETURNING id AS ticket_id, conversation_id;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        -2384,
+        -656
+      ],
+      "id": "42b7df64-cb31-4205-90bd-bbdc329a009e",
+      "name": "Update Ticket",
+      "credentials": {
+        "postgres": {
+          "id": "VHDEr5HgmwfQo3wC",
+          "name": "Postgres account 5"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "editMessageText",
+        "chatId": "={{ $('Telegram Trigger').item.json.callback_query.message.chat.id }}",
+        "messageId": "={{ $('Telegram Trigger').item.json.callback_query.message.message_id }}",
+        "text": "=✅ <b>تم استلام التذكرة بنجاح!</b> \n👤 <b>الموظف المسؤول:</b>{{ $('Switch').item.json.first_name }} 🎫\n<b>رقم التذكرة:</b>\n<code>{{ $json.ticket_id }}</code>  💬 <i>المحادثة قيد المتابعة حالياً.</i>",
+        "additionalFields": {
+          "parse_mode": "HTML"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -2160,
+        -656
+      ],
+      "id": "801a156a-92b5-41a9-9bcf-96acaf2d69fc",
+      "name": "Edit a text message",
+      "webhookId": "abc9d6a6-6ae4-4458-981d-1e58880bbc95",
+      "credentials": {
+        "telegramApi": {
+          "id": "ZXBzvczFWIRRpi8m",
+          "name": "Telegram account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4O-MINI"
+        },
+        "responses": {
+          "values": [
+            {
+              "content": "={{ $json.content }}"
+            },
+            {
+              "role": "system",
+              "content": "=# ROLE & PURPOSE\nYou are a highly constrained, production-grade Customer Service & Knowledge Base Classifier for Apple Inc. financial reporting data.\nYour sole responsibility is to analyze the user's incoming message and return a structured JSON decision payload. You must NEVER answer the query itself or output any conversational prose.\n\n# NAMESPACE CLASSIFICATION MAPPING\nYou must evaluate the customer query against the exact document namespaces below and select the single best match:\n\n- \"Q1.pdf\": Financial reports for Q1 (3 months ended December 28, 2024, or December 30, 2023). Covers Net Sales, Products (iPhone/Mac/iPad/Wearables/Services), Segment Revenues, Balance Sheets, and Cash Flows for Q1.\n- \"Q2.pdf\": Financial reports for Q2 (3/6 months ended March 29, 2025, or March 30, 2024). Covers Condensed Statements of Operations, Balance Sheets, and Cash Flows for Q2.\n- \"Q3.pdf\": Financial reports for Q3 (3/9 months ended June 29, 2024, or July 1, 2023). Covers Condensed Statements of Operations, Balance Sheets, and Cash Flows for Q3.\n- \"Q4.pdf\": Financial reports for Q4 / Fiscal Year End (3/12 months ended September 28, 2024, or September 30, 2023). Covers Consolidated Financial Statements, Balance Sheets, Cash Flows, and Non-GAAP reconciliations.\n- \"Q5.pdf\": Historical financial reports for Q3 / 9 months ended June 30, 2018, or July 1, 2017. Covers legacy Balance Sheets, Operations, and Cash Flows.\n\n# OUTPUT FORMAT CONSTRAINTS\nOutput MUST be valid, parsable JSON ONLY. Do not wrap in markdown code blocks unless requested. Follow this exact schema:\n\n{\n  \"namespace\": \"Q1.pdf\" | \"Q2.pdf\" | \"Q3.pdf\" | \"Q4.pdf\" | \"Q5.pdf\",\n  \"sentiment\": \"happy\" | \"neutral\" | \"frustrated\" | \"angry\",\n  \"should_escalate_immediately\": true | false,\n  \"refined_query\": \"A clean, concise rephrased version of the query retaining all dates, financial metrics, and crucially preserving any English financial terms or names in parentheses (e.g., Net Income, Net Sales) since the underlying PDF documents are in English, ensuring optimal vector retrieval in Pinecone\"\n}\n\n# IMMEDIATE ESCALATION RULES\nSet `should_escalate_immediately` to `true` IF AND ONLY IF:\n1. The user's sentiment is 'frustrated' or 'angry'.\n2. The user explicitly requests human support, formal complaint, or agent contact.\n3. The query contains legal threats or unresolved financial/billing disputes.\nOtherwise, set to `false`."
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {
+          "textFormat": {
+            "textOptions": {
+              "type": "json_object"
+            }
+          },
+          "temperature": 0
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.3,
+      "position": [
+        -1200,
+        -592
+      ],
+      "id": "cd08b52f-2ecc-46f1-85f7-a815d2807053",
+      "name": "Message a model",
+      "credentials": {
+        "openAiApi": {
+          "id": "h194ciLm8x8p4nVK",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "9bc8f791-3ec5-46f6-9a3c-c10c0be86fcb",
+              "leftValue": "={{ $json.from_cache }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -288,
+        -592
+      ],
+      "id": "630aeb68-0939-4fab-92c6-ea2f8a0a7bc9",
+      "name": "Verify the escalation"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.cohere.com/v2/rerank",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Beraer {{$env.COHERE_RENAK_API_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ \n  JSON.stringify({\n    \"model\": \"rerank-v3.5\",\n    \"query\": $('Extract Message & Idempotency Key').first().json.text,\n    \"documents\": $('Pinecone RAG Search').first().json.matches.map(m => m.metadata.text),\n    \"top_n\": 3\n  }) \n}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -64,
+        -304
+      ],
+      "id": "8baeee38-441f-4325-bf2e-ba4a5dea8eaf",
+      "name": "cohere_rerank"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT answer \nFROM messages \nWHERE conversation_id = $1 \n  AND content = $2 \n  AND answer IS NOT NULL \nORDER BY created_at DESC \nLIMIT 1;",
+        "options": {
+          "queryReplacement": "=={{ $('Upsert Customer & Log Message').item.json.conversation_id }}={{ $json.output[0].content[0].text.refined_query }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        -704,
+        -592
+      ],
+      "id": "ee009d38-fa35-4025-b572-7b13628f675d",
+      "name": "Execute a SQL query2",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "VHDEr5HgmwfQo3wC",
+          "name": "Postgres account 5"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Loop over input items and add a new field called 'myNewField' to the JSON of each one\n// جلب مخرجات استعلام الكاش من Supabase\nconst cacheResult = $input.all();\n\n// جلب السؤال الأصلي وبيانات المحادثة من الخطوات السابقة (تأكد من تطابق اسم العقدة لديك)\nconst originalText = $('Extract Message & Idempotency Key').first().json.text;\nconst chatId = $('Extract Message & Idempotency Key').first().json.chat_id;\nconst conversationId = $('Upsert Customer & Log Message').first().json.conversation_id;\nconst namespace = $('Message a model').first().json.output[0].content[0].text.namespace\n\n// التحقق مما إذا كان الاستعلام قد أرجع إجابة مخزنة\nif (cacheResult && cacheResult.length > 0 && cacheResult[0].json && cacheResult[0].json.answer) {\n  // --- حالة وجود كاش (Cache Hit) ---\n  return [{\n    json: {\n      from_cache: true,\n      answer: cacheResult[0].json.answer,\n      text: originalText,\n      chat_id: chatId,\n      conversation_id: conversationId,\n      total_tokens: 0,\n      estimated_cost_usd: 0,\n      is_deflected: true\n    }\n  }];\n} else {\n  // --- حالة عدم وجود كاش (Cache Miss) - سؤال جديد ---\n  return [{\n    json: {\n      from_cache: false,\n      text: originalText,\n      chat_id: chatId,\n      conversation_id: conversationId,\n      namespace : namespace\n    }\n  }];\n}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -496,
+        -592
+      ],
+      "id": "d2e75434-a849-4a66-b3f7-c107c28744ea",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "={{ $json.answer }}",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "👍 مفيدة",
+                    "additionalFields": {
+                      "callback_data": "rate_good"
+                    }
+                  },
+                  {
+                    "text": "👎 غير مفيدة",
+                    "additionalFields": {
+                      "callback_data": "rate_bad"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "👨‍💼 طلب تحويل لموظف",
+                    "additionalFields": {
+                      "callback_data": "escalate_human"
+                    }
+                  }
+                ]
+              }
+            },
+            {}
+          ]
+        },
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "id": "1e691e35-6add-4480-824a-7e10a399b425",
+      "name": "Send AI Telegram Response1",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [
+        16,
+        -608
+      ],
+      "webhookId": "c48f1ad0-53f9-4e65-a6cd-679cfae1506f",
+      "credentials": {
+        "telegramApi": {
+          "id": "ZXBzvczFWIRRpi8m",
+          "name": "Telegram account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "file",
+        "fileId": "={{ $json.message.voice.file_id }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -4384,
+        -944
+      ],
+      "id": "a542b308-661e-44ba-bafb-720f4272d163",
+      "name": "Get a file",
+      "webhookId": "07340dd6-9264-4dfd-bf28-54119f1e0090",
+      "credentials": {
+        "telegramApi": {
+          "id": "ZXBzvczFWIRRpi8m",
+          "name": "Telegram account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "audio",
+        "operation": "transcribe",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.3,
+      "position": [
+        -3888,
+        -944
+      ],
+      "id": "104eaa5e-d157-44a8-97ed-7add4d23a377",
+      "name": "Transcribe a recording",
+      "credentials": {
+        "openAiApi": {
+          "id": "h194ciLm8x8p4nVK",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "b8772386-2283-41cf-9ed4-f3c3d8a4f19a",
+              "name": "updata_id",
+              "value": "={{$('Telegram Trigger').item.json.update_id }}",
+              "type": "string"
+            },
+            {
+              "id": "86fea68e-9bf4-4962-ac64-1e729a131908",
+              "name": "chat_id",
+              "value": "={{$('Telegram Trigger').item.json.message.chat.id }}{{ $json.callback_query.message.chat.id }}",
+              "type": "string"
+            },
+            {
+              "id": "b8d1be67-202e-4c2c-879b-3c6639c86d96",
+              "name": "user_id",
+              "value": "={{$('Telegram Trigger').item.json.message.from.id }}{{ $json.callback_query.message.from.id }}",
+              "type": "string"
+            },
+            {
+              "id": "85fe8ff7-2c96-47c2-bb39-f34caa8b18ac",
+              "name": "name",
+              "value": "={{$('Telegram Trigger').item.json.message.from.first_name }}{{ $json.callback_query.from.first_name }}",
+              "type": "string"
+            },
+            {
+              "id": "83b3bca9-32d9-4e43-8a4d-969e96f1b4e2",
+              "name": "text",
+              "value": "={{$json.message.text }} {{ $json.text }}",
+              "type": "string"
+            },
+            {
+              "id": "39124313-9ce8-40c3-baf8-97056d9e48da",
+              "name": "callback_query",
+              "value": "={{ $json.callback_query.data }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        -3728,
+        -672
+      ],
+      "id": "088b9e57-1f23-4cef-b3c2-ab726ee17d1b",
+      "name": "Edit Fields"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "aea9cd9e-c6a9-4db2-9676-052592fe89e6",
+              "leftValue": "={{ $json.message.voice }}",
+              "rightValue": "",
+              "operator": {
+                "type": "object",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -4368,
+        -688
+      ],
+      "id": "6a5e7cf3-941d-4562-a364-f49ac98a40a6",
+      "name": "condation__mastext_vioes"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "condation__mastext_vioes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Message & Idempotency Key": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Idempotency (Supabase)": {
+      "main": [
+        [
+          {
+            "node": "Send a chat action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Unique Message?": {
+      "main": [
+        [
+          {
+            "node": "Rate Limit Check (Supabase)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rate Limit Check (Supabase)": {
+      "main": [
+        [
+          {
+            "node": "Under Rate Limit?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Under Rate Limit?": {
+      "main": [
+        [
+          {
+            "node": "Upsert Customer & Log Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Rate Limit Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Customer & Log Message": {
+      "main": [
+        [
+          {
+            "node": "Get Conversation History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Conversation History": {
+      "main": [
+        [
+          {
+            "node": "Message a model",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Vector Embedding": {
+      "main": [
+        [
+          {
+            "node": "Pinecone RAG Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pinecone RAG Search": {
+      "main": [
+        [
+          {
+            "node": "cohere_rerank",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Reasoning & Intent Classification": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Confidence & Decision Route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Confidence & Decision Route": {
+      "main": [
+        [
+          {
+            "node": "Confidence Routing Switch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Confidence Routing Switch": {
+      "main": [
+        [
+          {
+            "node": "Send Human Escalation Notice",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send AI Telegram Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send AI Telegram Response": {
+      "main": [
+        [
+          {
+            "node": "Log AI Reply in Database",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Human Escalation Notice": {
+      "main": [
+        [
+          {
+            "node": "Escalate Ticket (Supabase Log)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Escalate Ticket (Supabase Log)": {
+      "main": [
+        []
+      ]
+    },
+    "Send a chat action": {
+      "main": [
+        [
+          {
+            "node": "Is Unique Message?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Answer Query a callback",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Switch",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check Idempotency (Supabase)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Answer Query a callback": {
+      "main": [
+        []
+      ]
+    },
+    "Switch": {
+      "main": [
+        [
+          {
+            "node": "Execute a SQL query",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Execute a SQL query1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute a SQL query1": {
+      "main": [
+        [
+          {
+            "node": "Send Human Escalation Notice1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Human Escalation Notice1": {
+      "main": [
+        [
+          {
+            "node": "Create Ticket in Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Ticket in Supabase": {
+      "main": [
+        [
+          {
+            "node": "Notify Support Group",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify Support Group": {
+      "main": [
+        [
+          {
+            "node": "Save Group Message ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Group Message ID": {
+      "main": [
+        []
+      ]
+    },
+    "Update Ticket": {
+      "main": [
+        [
+          {
+            "node": "Edit a text message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Message a model": {
+      "main": [
+        [
+          {
+            "node": "Execute a SQL query2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify the escalation": {
+      "main": [
+        [
+          {
+            "node": "Send AI Telegram Response1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Generate Vector Embedding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "cohere_rerank": {
+      "main": [
+        [
+          {
+            "node": "LLM Reasoning & Intent Classification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute a SQL query2": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Verify the escalation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log AI Reply in Database": {
+      "main": [
+        []
+      ]
+    },
+    "Get a file": {
+      "main": [
+        [
+          {
+            "node": "Transcribe a recording",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transcribe a recording": {
+      "main": [
+        [
+          {
+            "node": "Edit Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit Fields": {
+      "main": [
+        [
+          {
+            "node": "Extract Message & Idempotency Key",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "condation__mastext_vioes": {
+      "main": [
+        [
+          {
+            "node": "Get a file",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Edit Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "errorWorkflow": "UwVgQhoxKRbChQTp",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "7f2fa721-503c-4970-a591-49aaec4cef56",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "33d86b3a99397c860d697bd50e1c107de7b30b2c25727e64c0d7bc6220cf1d63"
+  },
+  "nodeGroups": [],
+  "id": "SpzNHrf6sL7vMS7P",
+  "tags": []
+}
